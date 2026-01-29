@@ -8,9 +8,9 @@ from openpi.models import model as _model
 
 
 def make_libero_example() -> dict:
-    """Creates a random input example for the Libero policy."""
+    """Creates a random input example for the Yofo policy."""
     return {
-        "observation/state": np.random.rand(8),
+        "observation/state": np.random.rand(7),  # Yofo: 6 joints + 1 gripper = 7D
         "observation/image": np.random.randint(256, size=(224, 224, 3), dtype=np.uint8),
         "observation/wrist_image": np.random.randint(256, size=(224, 224, 3), dtype=np.uint8),
         "prompt": "do something",
@@ -40,30 +40,24 @@ class LiberoInputs(transforms.DataTransformFn):
     model_type: _model.ModelType
 
     def __call__(self, data: dict) -> dict:
-        # Possibly need to parse images to uint8 (H,W,C) since LeRobot automatically
-        # stores as float32 (C,H,W), gets skipped for policy inference.
-        # Keep this for your own dataset, but if your dataset stores the images
-        # in a different key than "observation/image" or "observation/wrist_image",
-        # you should change it below.
-        # Pi0 models support three image inputs at the moment: one third-person view,
-        # and two wrist views (left and right). If your dataset does not have a particular type
-        # of image, e.g. wrist images, you can comment it out here and replace it with zeros like we do for the
-        # right wrist image below.
-        base_image = _parse_image(data["observation/image"])
+        # Yofo robot has only one wrist camera, no base camera.
+        # We use the wrist image for both base and left_wrist views to maximize
+        # the model's ability to understand the scene from the available camera.
         wrist_image = _parse_image(data["observation/wrist_image"])
 
-        # Create inputs dict. Do not change the keys in the dict below.
+        # For Yofo: use wrist camera image for both base and left_wrist inputs
+        # This allows the model to process the single camera view through multiple pathways
         inputs = {
-            "state": data["observation/state"],
+            "state": data["observation/state"],  # 7D: 6 joints + 1 gripper
             "image": {
-                "base_0_rgb": base_image,
-                "left_wrist_0_rgb": wrist_image,
-                # Pad any non-existent images with zero-arrays of the appropriate shape.
-                "right_wrist_0_rgb": np.zeros_like(base_image),
+                "base_0_rgb": wrist_image,  # Yofo: reuse wrist camera
+                "left_wrist_0_rgb": wrist_image,  # Yofo: actual wrist camera
+                # Pad right wrist with zeros since Yofo doesn't have it
+                "right_wrist_0_rgb": np.zeros_like(wrist_image),
             },
             "image_mask": {
-                "base_0_rgb": np.True_,
-                "left_wrist_0_rgb": np.True_,
+                "base_0_rgb": np.True_,  # Enable: using wrist camera
+                "left_wrist_0_rgb": np.True_,  # Enable: actual wrist camera
                 # We only mask padding images for pi0 model, not pi0-FAST. Do not change this for your own dataset.
                 "right_wrist_0_rgb": np.True_ if self.model_type == _model.ModelType.PI0_FAST else np.False_,
             },
@@ -95,6 +89,6 @@ class LiberoOutputs(transforms.DataTransformFn):
     def __call__(self, data: dict) -> dict:
         # Only return the first N actions -- since we padded actions above to fit the model action
         # dimension, we need to now parse out the correct number of actions in the return dict.
-        # For Libero, we only return the first 7 actions (since the rest is padding).
-        # For your own dataset, replace `7` with the action dimension of your dataset.
+        # For Yofo robot: 6 joint angles + 1 gripper = 7 actions total.
+        # This matches the robot's action space: [joint1, joint2, ..., joint6, gripper]
         return {"actions": np.asarray(data["actions"][:, :7])}

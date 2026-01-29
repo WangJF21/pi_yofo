@@ -356,6 +356,55 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotYofoDataConfig(DataConfigFactory):
+    """
+    Config for Yofo single-arm robot (6 joints + 1 gripper = 7D action space).
+    Yofo has only one wrist camera, no base camera.
+    """
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # Repack transform to match Yofo's data format
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "image",
+                        "observation/wrist_image": "wrist_image",
+                        "observation/state": "state",
+                        "actions": "actions",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        # Data transforms using Yofo-specific policy (modified libero_policy)
+        data_transforms = _transforms.Group(
+            inputs=[libero_policy.LiberoInputs(model_type=model_config.model_type)],
+            outputs=[libero_policy.LiberoOutputs()],
+        )
+
+        # Yofo uses absolute joint angles, so we need delta conversion
+        # Apply delta transform to first 6 actions (joints), keep gripper (7th) absolute
+        delta_action_mask = _transforms.make_bool_mask(6, -1)
+        data_transforms = data_transforms.push(
+            inputs=[_transforms.DeltaActions(delta_action_mask)],
+            outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+        )
+
+        # Model transforms
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class RLDSDroidDataConfig(DataConfigFactory):
     """
     Config for training on DROID, using RLDS data format (for efficient training on larger datasets).
@@ -759,6 +808,39 @@ _CONFIGS = [
         ema_decay=0.999,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
+        num_train_steps=30_000,
+    ),
+    #
+    # Yofo robot configs.
+    #
+    TrainConfig(
+        name="pi05_yofo",
+        # Yofo: 6 joints + 1 gripper = 7D action space
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=7,
+            action_horizon=10,
+            discrete_state_input=False
+        ),
+        data=LeRobotYofoDataConfig(
+            repo_id="your_hf_username/yofo_dataset",  # Replace with your Yofo dataset repo
+            base_config=DataConfig(prompt_from_task=True),
+            assets=AssetsConfig(
+                # Use pi05 base model assets for initialization
+                assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets",
+                asset_id="yofo",
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=5_000,
+            peak_lr=5e-5,
+            decay_steps=500_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
         num_train_steps=30_000,
     ),
     #
